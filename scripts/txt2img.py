@@ -30,6 +30,7 @@ safety_model_id = "CompVis/stable-diffusion-safety-checker"
 safety_feature_extractor = AutoFeatureExtractor.from_pretrained(safety_model_id)
 safety_checker = StableDiffusionSafetyChecker.from_pretrained(safety_model_id)
 
+torch.set_printoptions(profile="full")
 
 def chunk(it, size):
     it = iter(it)
@@ -278,8 +279,19 @@ def main():
             data = f.read().splitlines()
             data = list(chunk(data, batch_size))
 
-    sample_path = os.path.join(outpath, "samples")
+    sample_path = os.path.join(outpath, "samples")   
     os.makedirs(sample_path, exist_ok=True)
+    intermediate_path = os.path.join(outpath, "intermediates")
+    os.makedirs(intermediate_path, exist_ok=True)
+    os.makedirs(os.path.join(intermediate_path, "x_inter"), exist_ok=True)
+    os.makedirs(os.path.join(intermediate_path, "pred_x0"), exist_ok=True)
+    os.makedirs(os.path.join(intermediate_path, "x_inter_latents"), exist_ok=True)
+    os.makedirs(os.path.join(intermediate_path, "pred_x0_latents"), exist_ok=True)
+    os.makedirs(os.path.join(intermediate_path, "x_inter_values"), exist_ok=True)
+    os.makedirs(os.path.join(intermediate_path, "pred_x0_values"), exist_ok=True)
+    os.makedirs(os.path.join(intermediate_path, "x_inter_pickle"), exist_ok=True)
+    os.makedirs(os.path.join(intermediate_path, "pred_x0_pickle"), exist_ok=True)
+    os.makedirs(os.path.join(intermediate_path, "x_schedule"), exist_ok=True)
     base_count = len(os.listdir(sample_path))
     grid_count = len(os.listdir(outpath)) - 1
 
@@ -300,9 +312,12 @@ def main():
                             uc = model.get_learned_conditioning(batch_size * [""])
                         if isinstance(prompts, tuple):
                             prompts = list(prompts)
+                        # print(prompts)
                         c = model.get_learned_conditioning(prompts)
+                        # print(c)
                         shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
-                        samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
+                        print(f"[start_code] {start_code}")
+                        samples_ddim, intermediates = sampler.sample(S=opt.ddim_steps,
                                                          conditioning=c,
                                                          batch_size=opt.n_samples,
                                                          shape=shape,
@@ -310,7 +325,66 @@ def main():
                                                          unconditional_guidance_scale=opt.scale,
                                                          unconditional_conditioning=uc,
                                                          eta=opt.ddim_eta,
-                                                         x_T=start_code)
+                                                         x_T=start_code,
+                                                         log_every_t=1)
+                        
+                        ###############Save Intermediates
+                                
+
+                        # for output_variable, outputdir2, outputdir3, outputdir4 in [("x_inter", "x_inter_latents", "x_inter_values", "x_inter_pickle"), ("pred_x0", "pred_x0_latents", "pred_x0_values", "pred_x0_pickle")]:
+                        for output_variable, o2, o3, o4, o5 in [("x_inter", "x_inter_latents", "x_inter_values", "x_inter_pickle", "x_schedule")]:
+                            x_intermediate_path = os.path.join(intermediate_path, output_variable)
+                            x_latent_intermediate_path = os.path.join(intermediate_path, o2)
+                            x_value_intermediate_path = os.path.join(intermediate_path, o3)
+                            x_pickle_intermediate_path = os.path.join(intermediate_path, o4)
+                            x_schedule_path = os.path.join(intermediate_path, o5)
+                            base_count_2 = len(os.listdir(x_intermediate_path))
+
+                            temp = base_count_2
+                            for s_values in intermediates["schedule"]:
+                               # Save values of latent space representation
+                                file_path = os.path.join(x_schedule_path, f"{base_count_2:05}.txt")
+                                with open(file_path, 'w') as f:
+                                    f.write(s_values)
+                                    base_count_2 += 1
+                            base_count_2 = temp
+
+                            
+                            for img_ddim in intermediates[output_variable]:
+                                # Save values of latent space representation
+                                file_path = os.path.join(x_value_intermediate_path, f"{base_count_2:05}.txt")
+                                with open(file_path, 'w') as f:
+                                    f.write(str(img_ddim.shape) + '\n')
+                                    f.write(str(img_ddim))
+                                # Pickle the tensor of latent space representation
+                                torch.save(img_ddim, os.path.join(x_pickle_intermediate_path, f"{base_count_2:05}.pt"))
+
+                                # Visualise and save latent space representation (not sure if useful here)
+                                latent_rep = img_ddim.squeeze(0)
+                                latent_rep = latent_rep.cpu().permute(1, 2, 0).numpy()
+                                latent_rep = (latent_rep * 255).astype('uint8')
+                                latent_rep = Image.fromarray(latent_rep, 'RGBA')
+                                latent_rep.save(os.path.join(x_latent_intermediate_path, f"{base_count_2:05}.png"))
+
+                                # print(f"img_ddim.shape: {img_ddim.shape}")
+                                x_img_ddim = model.decode_first_stage(img_ddim)
+                                # print(f"x_img_ddim.shape: {x_img_ddim.shape}")
+                                x_img_ddim = torch.clamp((x_img_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+                                x_img_ddim = x_img_ddim.cpu().permute(0, 2, 3, 1).numpy()
+                                # print(f"[torch.from_numpy(x_img_ddim)] {torch.from_numpy(x_img_ddim).shape}")
+                                x_checked_image_torch = torch.from_numpy(x_img_ddim).permute(0, 3, 1, 2)
+                                # print(f"x_checked_image_torch: {x_checked_image_torch.shape}")
+                                if not opt.skip_save:
+                                    for x_sample in x_checked_image_torch:
+                                        x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+                                        # print(f"[x_sample.shape]: {x_sample.shape}")
+                                        img = Image.fromarray(x_sample.astype(np.uint8))
+                                        # print(f"[img.size]: {img.size}")
+                                        img.save(os.path.join(x_intermediate_path, f"{base_count_2:05}.png"))
+                                        base_count_2 += 1
+
+
+                        ###############Save Intermediates
 
                         x_samples_ddim = model.decode_first_stage(samples_ddim)
                         x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
